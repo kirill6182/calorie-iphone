@@ -19,13 +19,10 @@ const IC={
 const FOODS=[['Куриная грудка',165,31,3.6,0],['Рис варёный',130,2.7,.3,28],['Гречка варёная',110,4,1,21],['Овсянка на воде',70,2.5,1.5,12],['Яйцо варёное',155,13,11,1.1],['Банан',89,1.1,.3,23],['Яблоко',52,.3,.2,14],['Хлеб пшеничный',265,9,3.2,49],['Творог 5%',121,17,5,1.8],['Молоко 2.5%',52,2.9,2.5,4.8],['Сыр твёрдый',350,25,27,0],['Картофель варёный',87,1.9,.1,20],['Макароны варёные',158,5.8,.9,31],['Лосось',208,20,13,0],['Огурец',15,.8,.1,2.8],['Помидор',18,.9,.2,3.9],['Пицца',266,11,10,33],['Йогурт натуральный',60,4,3,4.7],['Авокадо',160,2,15,9],['Миндаль',579,21,50,22],['Шоколад молочный',535,7.6,30,59],['Оливковое масло',884,0,100,0]];
  
 /* ---------- состояние ---------- */
-const defaults=()=>({meals:[],goals:{cal:2000,p:150,f:70,c:200},settings:{provider:'yandex',keys:{yandex:''},models:{yandex:'qwen3.6-35b-a3b'},folderId:'',theme:'system'},hintHidden:false});
+const defaults=()=>({meals:[],goals:{cal:2000,p:150,f:70,c:200},settings:{provider:'yandex',proxyUrl:'',theme:'system'},hintHidden:false});
 function load(){try{const d=JSON.parse(localStorage.getItem(KEY))||{},b=defaults(),o=d.settings||{};
-  const st={...b.settings,...o,provider:'yandex',
-    keys:{yandex:(o.keys&&o.keys.yandex)||''},
-    models:{yandex:(o.models&&o.models.yandex)||b.settings.models.yandex},
-    folderId:o.folderId||''};
-  delete st.apiKey;delete st.model;
+  const st={...b.settings,...o,provider:'yandex',proxyUrl:o.proxyUrl||''};
+  delete st.apiKey;delete st.model;delete st.keys;delete st.models;delete st.folderId;
   return {...b,...d,goals:{...b.goals,...d.goals},settings:st}}catch(e){return defaults()}}
 let S=load(),tab='home',stream=null,sc={},mf={};
 function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){toast('Не удалось сохранить: память переполнена')}}
@@ -71,45 +68,23 @@ const PROMPT=`Ты нутрициолог. По фото определи еду
 weight — граммы, calories — ккал, protein/fat/carbs — граммы; всё для указанного веса порции.
 Если на фото нет еды, верни {"items":[]}.`;
 const num=v=>Math.max(0,rnd(Number(v)||0));
-const PROV={yandex:{name:'Yandex AI Studio (Qwen)',model:'qwen3.6-35b-a3b'}};
-const curKey=()=>(S.settings.keys.yandex||'').trim();
-const curModel=()=>(S.settings.models.yandex||'').trim()||PROV.yandex.model;
+const curProxy=()=>(S.settings.proxyUrl||'').trim();
 function parseItems(text){
   const a=text.indexOf('{'),z=text.lastIndexOf('}'),bad='Не удалось разобрать ответ. Попробуй ещё раз.';
   if(a<0||z<0)throw new Error(bad);
   let j;try{j=JSON.parse(text.slice(a,z+1))}catch(e){throw new Error(bad)}
   return (j.items||[]).map(i=>({name:String(i.name||'Блюдо'),weight:num(i.weight),calories:num(i.calories),protein:num(i.protein),fat:num(i.fat),carbs:num(i.carbs)}));
 }
-async function post(url,headers,body){
-  let res;
-  try{res=await fetch(url,{method:'POST',headers:{'content-type':'application/json',...headers},body:JSON.stringify(body)})}
-  catch(e){throw new Error('Нет соединения с Yandex AI Studio. Проверь интернет и доступность API.')}
-  if(!res.ok){
-    let m='';try{const x=await res.json();m=x.error?.message||x.message||''}catch(e){}
-    throw new Error(res.status===401||res.status===403?'Нет доступа. Проверь API-ключ, его область действия и роль сервисного аккаунта.':res.status===429?'Лимит запросов исчерпан. Подожди немного.':res.status===404?'Модель или API не найдены. Проверь название модели.':`Ошибка Yandex Cloud (${res.status}). ${m.slice(0,160)}`);
-  }
-  return res.json();
-}
-/* Распознавание еды через мультимодальную модель Yandex AI Studio.
-   Для этого API нужен API-ключ с областью yc.ai.foundationModels.execute,
-   роль сервисного аккаунта ai.languageModels.user и Folder ID. */
 async function recognize(img){
-  const key=curKey();
-  if(!key){await new Promise(r=>setTimeout(r,1200));return JSON.parse(JSON.stringify(MOCK[Math.floor(Math.random()*MOCK.length)]))}
-  const folderId=(S.settings.folderId||'').trim();
-  if(!folderId)throw new Error('Укажи Folder ID в настройках Yandex AI Studio.');
-  const b64=img.split(',')[1],model=curModel();
-  const d=await post('https://ai.api.cloud.yandex.net/v1/chat/completions',
-    {'Authorization':`Api-Key ${key}`,'OpenAI-Project':folderId},
-    {model:`gpt://${folderId}/${model}`,temperature:0.1,max_tokens:1000,
-      messages:[{role:'user',content:[
-        {type:'text',text:PROMPT+'\nОпредели все видимые блюда. Оцени вес каждой порции. Верни только JSON.'},
-        {type:'image_url',image_url:{url:`data:image/jpeg;base64,${b64}`}}
-      ]}]});
-  const msg=d.choices?.[0]?.message?.content;
-  const text=typeof msg==='string'?msg:Array.isArray(msg)?msg.map(x=>x.text||'').join(''):'';
-  if(!text)throw new Error('Yandex AI Studio вернула пустой ответ. Попробуй ещё раз.');
-  return parseItems(text);
+  const proxy=curProxy();
+  if(!proxy){await new Promise(r=>setTimeout(r,1200));return JSON.parse(JSON.stringify(MOCK[Math.floor(Math.random()*MOCK.length)]))}
+  let res;
+  try{res=await fetch(proxy,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image:img})})}
+  catch(e){throw new Error('Не удалось связаться с сервером-посредником. Проверь URL функции и интернет.')}
+  let data={};try{data=await res.json()}catch(e){}
+  if(!res.ok)throw new Error(data.error||`Ошибка сервера (${res.status}).`);
+  if(!data.items||!Array.isArray(data.items))throw new Error('Сервер вернул ответ в неизвестном формате.');
+  return data.items.map(i=>({name:String(i.name||'Блюдо'),weight:num(i.weight),calories:num(i.calories),protein:num(i.protein),fat:num(i.fat),carbs:num(i.carbs)}));
 }
 
 /* ---------- сканер ---------- */
@@ -127,7 +102,7 @@ async function openScan(){
 }
 function paintScan(){
   const s=sc;$('#shot').hidden=s.phase==='live';
-  let h=`<button class="rb close" data-act="sclose" aria-label="Закрыть">${IC.x}</button>${curKey()?'':'<span class="demo">Демо-режим: ключ не задан</span>'}`;
+  let h=`<button class="rb close" data-act="sclose" aria-label="Закрыть">${IC.x}</button>${curProxy()?'':'<span class="demo">Демо-режим: адрес сервера не задан</span>'}`;
   if(s.phase==='live')h+=(s.camErr?`<p class="camerr">${esc(s.camErr)}</p>`:'<div class="frame"></div>')+`<div class="shutter-row"><label class="rb pick" aria-label="Снять или выбрать фото">${IC.img}<input type="file" accept="image/*" id="pick" style="display:none"></label>${s.camErr?'':'<button class="shutter" data-act="snap" aria-label="Сделать снимок"></button>'}</div>`;
   else if(s.phase==='analyzing')h+='<div class="analyzing"><p class="pulse">Анализируем…</p></div>';
   else if(s.phase==='result')h+=`<div class="panel"><h2>Распознано</h2><ul>${s.items.map((d,i)=>`<li><span>${esc(d.name)} (${d.weight} г) — <b>${d.calories} ккал</b></span><button class="ix" data-act="sdrop" data-i="${i}" aria-label="Убрать">${IC.x}</button></li>`).join('')}</ul><div class="chips">${chips('stype',s.type)}</div><div class="two"><button class="btn" data-act="smanual">Изменить вручную</button><button class="btn pri" data-act="sok"${s.items.length?'':' disabled'}>Подтвердить</button></div></div>`;
@@ -160,13 +135,13 @@ function calc(){
 }
 function provHTML(){
   const st=S.settings;
-  return `<div class="chips"><span class="chip on">Yandex AI Studio (Qwen)</span></div><label>API-ключ Yandex Cloud<input type="password" autocomplete="off" autocapitalize="off" placeholder="Введите API-ключ" data-s="key" value="${esc(st.keys.yandex||'')}"></label><label>Folder ID<input data-s="folder" autocapitalize="off" placeholder="b1g..." value="${esc(st.folderId||'')}"></label><label>Модель<input data-s="model" autocapitalize="off" value="${esc(st.models.yandex||PROV.yandex.model)}"></label><p class="mu">Модель по умолчанию: qwen3.6-35b-a3b. Для распознавания фотографий нужен API-ключ с областью <b>yc.ai.foundationModels.execute</b> и роль сервисного аккаунта <b>ai.languageModels.user</b>.</p>`;
+  return `<div class="chips"><span class="chip on">Yandex AI Studio (Qwen)</span></div><label>URL серверной функции Yandex Cloud<input type="url" autocomplete="off" autocapitalize="off" placeholder="https://functions.yandexcloud.net/..." data-s="proxy" value="${esc(st.proxyUrl||'')}"></label><p class="mu">Вставь HTTPS URL функции из Yandex Cloud. API-ключ и Folder ID хранятся только в настройках серверной функции, а не в браузере.</p>`;
 }
 function openSettings(){
   const g=S.goals,gi=(k,l)=>`<label>${l}<input type="number" inputmode="numeric" min="0" data-g="${k}" value="${g[k]}"></label>`;
-  showSheet(`<div class="sh"><h2>Настройки</h2><button class="ix" data-act="shclose" aria-label="Закрыть">${IC.x}</button></div><div class="two">${gi('cal','Калории в день')}${gi('p','Белки, г')}${gi('f','Жиры, г')}${gi('c','Углеводы, г')}</div><h3>Распознавание еды</h3><div id="provbox">${provHTML()}</div><p class="mu">Ключ хранится в браузере на этом устройстве и отправляется в Yandex Cloud. Без ключа работает демо-режим со случайными блюдами. Не публикуй приложение с ключом в браузере: для публичного доступа нужен серверный прокси. Оценка калорий по фото приблизительная.</p><div class="two"><button class="btn" data-act="exp">Экспорт</button><button class="btn" data-act="imp">Импорт</button></div><input type="file" id="imp" accept=".json,application/json" style="display:none"><p></p><button class="btn bad wide" data-act="reset">Сбросить день</button>`);
+  showSheet(`<div class="sh"><h2>Настройки</h2><button class="ix" data-act="shclose" aria-label="Закрыть">${IC.x}</button></div><div class="two">${gi('cal','Калории в день')}${gi('p','Белки, г')}${gi('f','Жиры, г')}${gi('c','Углеводы, г')}</div><h3>Распознавание еды</h3><div id="provbox">${provHTML()}</div><p class="mu">Без URL функции работает демо-режим со случайными блюдами. API-ключ хранится на сервере и не публикуется в GitHub Pages. Оценка калорий по фото приблизительная.</p><div class="two"><button class="btn" data-act="exp">Экспорт</button><button class="btn" data-act="imp">Импорт</button></div><input type="file" id="imp" accept=".json,application/json" style="display:none"><p></p><button class="btn bad wide" data-act="reset">Сбросить день</button>`);
 }
-function setSetting(t){if(t.dataset.s==='key')S.settings.keys.yandex=t.value.trim();else if(t.dataset.s==='folder')S.settings.folderId=t.value.trim();else if(t.dataset.s==='model')S.settings.models.yandex=t.value.trim();save()}
+function setSetting(t){if(t.dataset.s==='proxy')S.settings.proxyUrl=t.value.trim();save()}
 async function exportData(){
   const data=JSON.stringify({meals:S.meals,goals:S.goals},null,2),name=`calories_${today()}.json`;
   try{const f=new File([data],name,{type:'application/json'});if(navigator.canShare&&navigator.canShare({files:[f]})){await navigator.share({files:[f],title:name});return}}catch(e){if(e&&e.name==='AbortError')return}
