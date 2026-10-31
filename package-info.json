@@ -1,0 +1,9 @@
+{
+  "contents": [
+    "app.js",
+    "function/index.js",
+    "README-инструкция.txt"
+  ],
+  "frontend_origin": "https://kirill6182.github.io",
+  "default_model": "qwen3.6-35b-a3b"
+}
