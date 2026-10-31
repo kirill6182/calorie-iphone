@@ -19,11 +19,12 @@ const IC={
 const FOODS=[['Куриная грудка',165,31,3.6,0],['Рис варёный',130,2.7,.3,28],['Гречка варёная',110,4,1,21],['Овсянка на воде',70,2.5,1.5,12],['Яйцо варёное',155,13,11,1.1],['Банан',89,1.1,.3,23],['Яблоко',52,.3,.2,14],['Хлеб пшеничный',265,9,3.2,49],['Творог 5%',121,17,5,1.8],['Молоко 2.5%',52,2.9,2.5,4.8],['Сыр твёрдый',350,25,27,0],['Картофель варёный',87,1.9,.1,20],['Макароны варёные',158,5.8,.9,31],['Лосось',208,20,13,0],['Огурец',15,.8,.1,2.8],['Помидор',18,.9,.2,3.9],['Пицца',266,11,10,33],['Йогурт натуральный',60,4,3,4.7],['Авокадо',160,2,15,9],['Миндаль',579,21,50,22],['Шоколад молочный',535,7.6,30,59],['Оливковое масло',884,0,100,0]];
  
 /* ---------- состояние ---------- */
-const defaults=()=>({meals:[],goals:{cal:2000,p:150,f:70,c:200},settings:{provider:'gemini',keys:{claude:'',gemini:''},models:{claude:'claude-haiku-5-5',gemini:'gemini-3.8-flash'},theme:'system'},hintHidden:false});
+const defaults=()=>({meals:[],goals:{cal:2000,p:150,f:70,c:200},settings:{provider:'yandex',keys:{yandex:''},models:{yandex:'qwen3.6-35b-a3b'},folderId:'',theme:'system'},hintHidden:false});
 function load(){try{const d=JSON.parse(localStorage.getItem(KEY))||{},b=defaults(),o=d.settings||{};
-  const st={...b.settings,...o,keys:{...b.settings.keys,...o.keys},models:{...b.settings.models,...o.models}};
-  if(o.apiKey&&!(o.keys&&o.keys.claude)){st.keys.claude=o.apiKey;st.provider='claude'}
-  if(o.model&&!(o.models&&o.models.claude))st.models.claude=o.model;
+  const st={...b.settings,...o,provider:'yandex',
+    keys:{yandex:(o.keys&&o.keys.yandex)||''},
+    models:{yandex:(o.models&&o.models.yandex)||b.settings.models.yandex},
+    folderId:o.folderId||''};
   delete st.apiKey;delete st.model;
   return {...b,...d,goals:{...b.goals,...d.goals},settings:st}}catch(e){return defaults()}}
 let S=load(),tab='home',stream=null,sc={},mf={};
@@ -70,9 +71,9 @@ const PROMPT=`Ты нутрициолог. По фото определи еду
 weight — граммы, calories — ккал, protein/fat/carbs — граммы; всё для указанного веса порции.
 Если на фото нет еды, верни {"items":[]}.`;
 const num=v=>Math.max(0,rnd(Number(v)||0));
-const PROV={claude:{name:'Claude (платно)',model:'claude-haiku-5-5'},gemini:{name:'Gemini (бесплатно)',model:'gemini-3.8-flash'}};
-const curKey=()=>(S.settings.keys[S.settings.provider]||'').trim();
-const curModel=()=>(S.settings.models[S.settings.provider]||'').trim()||PROV[S.settings.provider].model;
+const PROV={yandex:{name:'Yandex AI Studio (Qwen)',model:'qwen3.6-35b-a3b'}};
+const curKey=()=>(S.settings.keys.yandex||'').trim();
+const curModel=()=>(S.settings.models.yandex||'').trim()||PROV.yandex.model;
 function parseItems(text){
   const a=text.indexOf('{'),z=text.lastIndexOf('}'),bad='Не удалось разобрать ответ. Попробуй ещё раз.';
   if(a<0||z<0)throw new Error(bad);
@@ -82,33 +83,35 @@ function parseItems(text){
 async function post(url,headers,body){
   let res;
   try{res=await fetch(url,{method:'POST',headers:{'content-type':'application/json',...headers},body:JSON.stringify(body)})}
-  catch(e){throw new Error('Нет соединения с сервисом распознавания.')}
+  catch(e){throw new Error('Нет соединения с Yandex AI Studio. Проверь интернет и доступность API.')}
   if(!res.ok){
-    let m='';try{m=((await res.json()).error||{}).message||''}catch(e){}
-    throw new Error(res.status===401||/api key|API_KEY/i.test(m)?'Неверный API-ключ. Проверь его в настройках.':res.status===429?'Лимит запросов исчерпан. Подожди немного.':res.status===404?'Модель не найдена. Проверь её название в настройках.':`Ошибка сервиса (${res.status}). ${m.slice(0,120)}`);
+    let m='';try{const x=await res.json();m=x.error?.message||x.message||''}catch(e){}
+    throw new Error(res.status===401||res.status===403?'Нет доступа. Проверь API-ключ, его область действия и роль сервисного аккаунта.':res.status===429?'Лимит запросов исчерпан. Подожди немного.':res.status===404?'Модель или API не найдены. Проверь название модели.':`Ошибка Yandex Cloud (${res.status}). ${m.slice(0,160)}`);
   }
   return res.json();
 }
-/* Распознавание. Нет ключа — демо (случайные блюда). Есть — Gemini или Claude.
-   Чтобы подключить другой сервис, добавьте ветку по образцу ниже: отправьте фото
-   и верните массив [{name,weight,calories,protein,fat,carbs}] через parseItems().
-   Многие API запрещают вызовы из браузера (CORS) — тогда нужен свой прокси. */
+/* Распознавание еды через мультимодальную модель Yandex AI Studio.
+   Для этого API нужен API-ключ с областью yc.ai.foundationModels.execute,
+   роль сервисного аккаунта ai.languageModels.user и Folder ID. */
 async function recognize(img){
   const key=curKey();
-  if(!key){await new Promise(r=>setTimeout(r,2000));return JSON.parse(JSON.stringify(MOCK[Math.floor(Math.random()*MOCK.length)]))}
+  if(!key){await new Promise(r=>setTimeout(r,1200));return JSON.parse(JSON.stringify(MOCK[Math.floor(Math.random()*MOCK.length)]))}
+  const folderId=(S.settings.folderId||'').trim();
+  if(!folderId)throw new Error('Укажи Folder ID в настройках Yandex AI Studio.');
   const b64=img.split(',')[1],model=curModel();
-  if(S.settings.provider==='gemini'){
-    const d=await post(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,{'x-goog-api-key':key},
-      {systemInstruction:{parts:[{text:PROMPT}]},contents:[{role:'user',parts:[{inlineData:{mimeType:'image/jpeg',data:b64}},{text:'Что на фото? Верни JSON.'}]}],generationConfig:{responseMimeType:'application/json',maxOutputTokens:4096}});
-    const c=(d.candidates||[])[0],text=c&&c.content&&c.content.parts?c.content.parts.map(p=>p.text||'').join(''):'';
-    if(!text)throw new Error(c&&c.finishReason==='SAFETY'?'Сервис отклонил это фото.':'Пустой ответ. Попробуй ещё раз.');
-    return parseItems(text);
-  }
-  const d=await post('https://api.anthropic.com/v1/messages',{'x-api-key':key,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-    {model,max_tokens:1000,system:PROMPT,messages:[{role:'user',content:[{type:'image',source:{type:'base64',media_type:'image/jpeg',data:b64}},{type:'text',text:'Что на фото? Верни JSON.'}]}]});
-  return parseItems((d.content||[]).filter(b=>b.type==='text').map(b=>b.text).join(''));
+  const d=await post('https://ai.api.cloud.yandex.net/v1/chat/completions',
+    {'Authorization':`Api-Key ${key}`,'OpenAI-Project':folderId},
+    {model:`gpt://${folderId}/${model}`,temperature:0.1,max_tokens:1000,
+      messages:[{role:'user',content:[
+        {type:'text',text:PROMPT+'\nОпредели все видимые блюда. Оцени вес каждой порции. Верни только JSON.'},
+        {type:'image_url',image_url:{url:`data:image/jpeg;base64,${b64}`}}
+      ]}]});
+  const msg=d.choices?.[0]?.message?.content;
+  const text=typeof msg==='string'?msg:Array.isArray(msg)?msg.map(x=>x.text||'').join(''):'';
+  if(!text)throw new Error('Yandex AI Studio вернула пустой ответ. Попробуй ещё раз.');
+  return parseItems(text);
 }
- 
+
 /* ---------- сканер ---------- */
 function shrink(src,w,h,max,q){const k=Math.min(1,max/Math.max(w,h)),c=document.createElement('canvas');c.width=rnd(w*k);c.height=rnd(h*k);c.getContext('2d').drawImage(src,0,0,c.width,c.height);return c.toDataURL('image/jpeg',q)}
 function stopCam(){if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;$('#vid').srcObject=null}
@@ -156,15 +159,14 @@ function calc(){
   $('#madd').disabled=!ok;$('#madd').textContent=`Добавить · ${rnd(k*w/100)} ккал`;
 }
 function provHTML(){
-  const p=S.settings.provider,st=S.settings,
-  help=p==='gemini'?'Бесплатный ключ: <b>aistudio.google.com</b> → «Get API key». Карта не нужна. Google может использовать содержимое бесплатного тарифа для улучшения своих продуктов, в том числе ваши фото.':'Платный ключ: <b>console.anthropic.com</b> → Settings → API keys. Нужен пополненный баланс.';
-  return `<div class="chips">${Object.keys(PROV).map(k=>`<button class="chip${k===p?' on':''}" data-act="prov" data-k="${k}">${PROV[k].name}</button>`).join('')}</div><label>API-ключ<input type="password" autocomplete="off" autocapitalize="off" placeholder="${p==='gemini'?'AIza…':'sk-ant-…'}" data-s="key" value="${esc(st.keys[p]||'')}"></label><label>Модель<input data-s="model" autocapitalize="off" value="${esc(st.models[p]||PROV[p].model)}"></label><p class="mu">${help}</p>`;
+  const st=S.settings;
+  return `<div class="chips"><span class="chip on">Yandex AI Studio (Qwen)</span></div><label>API-ключ Yandex Cloud<input type="password" autocomplete="off" autocapitalize="off" placeholder="Введите API-ключ" data-s="key" value="${esc(st.keys.yandex||'')}"></label><label>Folder ID<input data-s="folder" autocapitalize="off" placeholder="b1g..." value="${esc(st.folderId||'')}"></label><label>Модель<input data-s="model" autocapitalize="off" value="${esc(st.models.yandex||PROV.yandex.model)}"></label><p class="mu">Модель по умолчанию: qwen3.6-35b-a3b. Для распознавания фотографий нужен API-ключ с областью <b>yc.ai.foundationModels.execute</b> и роль сервисного аккаунта <b>ai.languageModels.user</b>.</p>`;
 }
 function openSettings(){
   const g=S.goals,gi=(k,l)=>`<label>${l}<input type="number" inputmode="numeric" min="0" data-g="${k}" value="${g[k]}"></label>`;
-  showSheet(`<div class="sh"><h2>Настройки</h2><button class="ix" data-act="shclose" aria-label="Закрыть">${IC.x}</button></div><div class="two">${gi('cal','Калории в день')}${gi('p','Белки, г')}${gi('f','Жиры, г')}${gi('c','Углеводы, г')}</div><h3>Распознавание еды</h3><div id="provbox">${provHTML()}</div><p class="mu">Ключ хранится только на этом устройстве и отправляется только выбранному сервису. Без ключа работает демо-режим со случайными блюдами. Оценка калорий по фото приблизительная.</p><div class="two"><button class="btn" data-act="exp">Экспорт</button><button class="btn" data-act="imp">Импорт</button></div><input type="file" id="imp" accept=".json,application/json" style="display:none"><p></p><button class="btn bad wide" data-act="reset">Сбросить день</button>`);
+  showSheet(`<div class="sh"><h2>Настройки</h2><button class="ix" data-act="shclose" aria-label="Закрыть">${IC.x}</button></div><div class="two">${gi('cal','Калории в день')}${gi('p','Белки, г')}${gi('f','Жиры, г')}${gi('c','Углеводы, г')}</div><h3>Распознавание еды</h3><div id="provbox">${provHTML()}</div><p class="mu">Ключ хранится в браузере на этом устройстве и отправляется в Yandex Cloud. Без ключа работает демо-режим со случайными блюдами. Не публикуй приложение с ключом в браузере: для публичного доступа нужен серверный прокси. Оценка калорий по фото приблизительная.</p><div class="two"><button class="btn" data-act="exp">Экспорт</button><button class="btn" data-act="imp">Импорт</button></div><input type="file" id="imp" accept=".json,application/json" style="display:none"><p></p><button class="btn bad wide" data-act="reset">Сбросить день</button>`);
 }
-function setSetting(t){const p=S.settings.provider;if(t.dataset.s==='key')S.settings.keys[p]=t.value.trim();else S.settings.models[p]=t.value.trim();save()}
+function setSetting(t){if(t.dataset.s==='key')S.settings.keys.yandex=t.value.trim();else if(t.dataset.s==='folder')S.settings.folderId=t.value.trim();else if(t.dataset.s==='model')S.settings.models.yandex=t.value.trim();save()}
 async function exportData(){
   const data=JSON.stringify({meals:S.meals,goals:S.goals},null,2),name=`calories_${today()}.json`;
   try{const f=new File([data],name,{type:'application/json'});if(navigator.canShare&&navigator.canShare({files:[f]})){await navigator.share({files:[f],title:name});return}}catch(e){if(e&&e.name==='AbortError')return}
@@ -190,7 +192,6 @@ const ACT={
   settings:openSettings,scan:openScan,shclose:closeSheet,sclose:closeScan,snap,exp:exportData,
   imp(){$('#imp').click()},
   hint(){S.hintHidden=true;save();render()},
-  prov(d){S.settings.provider=d.k;save();$('#provbox').innerHTML=provHTML()},
   del(d){S.meals=S.meals.filter(m=>m.id!==d.id);save();render()},
   sdrop(d){sc.items.splice(+d.i,1);paintScan()},
   stype(d){sc.type=d.k;paintScan()},
